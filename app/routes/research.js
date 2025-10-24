@@ -11,10 +11,10 @@ function ResearchHandler(db) {
 
   // ---- SSRF protections ----
   const ALLOWED_HOSTS = new Set([
-    // TODO: keep only the hosts your app truly needs to call
+    // keep only hosts your app truly needs
     "api.github.com",
     "query1.finance.yahoo.com",
-    "jsonplaceholder.typicode.com"
+    "jsonplaceholder.typicode.com",
   ]);
 
   function isPrivateIp(ip) {
@@ -22,9 +22,16 @@ function ResearchHandler(db) {
     return (
       ip.startsWith("10.") ||
       ip.startsWith("192.168.") ||
-      (ip.startsWith("172.") && (() => { const n = +ip.split(".")[1]; return n >= 16 && n <= 31; })()) ||
-      ip === "127.0.0.1" || ip === "::1" ||
-      ip.startsWith("169.254.") || ip.startsWith("0.") || ip.startsWith("100.64.")
+      (ip.startsWith("172.") &&
+        (() => {
+          const n = +ip.split(".")[1];
+          return n >= 16 && n <= 31;
+        })()) ||
+      ip === "127.0.0.1" ||
+      ip === "::1" ||
+      ip.startsWith("169.254.") ||
+      ip.startsWith("0.") ||
+      ip.startsWith("100.64.")
     );
   }
 
@@ -57,41 +64,44 @@ function ResearchHandler(db) {
 
       // 3) DNS resolve & block private/loopback targets
       const addrs = await dns.lookup(baseUrl.hostname, { all: true });
-      if (addrs.some(a => isPrivateIp(a.address))) {
+      if (addrs.some((a) => isPrivateIp(a.address))) {
         return res.status(400).send("Blocked internal address");
       }
 
-      // 4) Build final URL by appending a *safe* symbol
-      //    If your upstream expects a query param instead, replace the next line with:
-      //    baseUrl.searchParams.set('symbol', symbol);
-      const finalUrl = baseUrl.toString() + encodeURIComponent(symbol);
+      // 4) Rebuild a *new* URL (break taint flow) and append the safe symbol
+      //    If your upstream expects a query parameter instead of path, do:
+      //    safeUrl.searchParams.set('symbol', symbol);
+      const safeUrl = new URL(baseUrl.toString()); // reconstructed after validation
+      safeUrl.pathname = (safeUrl.pathname || "") + encodeURIComponent(symbol);
+      const targetUrl = safeUrl.toString();
 
       // 5) Fetch with strong limits (no redirects, short timeouts)
       const options = {
-        follow_max: 0,            // no redirects
-        open_timeout: 8000,       // ms
+        follow_max: 0, // no redirects
+        open_timeout: 8000,
         response_timeout: 8000,
         read_timeout: 8000,
-        compressed: true,         // allow gzip/deflate
-        parse: false              // we will treat as text
+        compressed: true,
+        parse: false, // treat as text
       };
 
-      const resp = await needle("get", finalUrl, options);
+      const resp = await needle("get", targetUrl, options);
 
       if (resp.statusCode < 200 || resp.statusCode >= 300) {
         return res.status(502).send("Upstream error");
       }
 
       // 6) Cap response size (1 MB)
-      const body = typeof resp.body === "string" ? resp.body : resp.body?.toString("utf8");
+      const body =
+        typeof resp.body === "string" ? resp.body : resp.body?.toString("utf8");
       if (!body) return res.status(502).send("Empty upstream response");
       if (body.length > 1_000_000) return res.status(413).send("Response too large");
 
       // 7) Return as text to avoid reflecting raw HTML/JS from upstream
       res.type("text/plain");
-      return res.status(200).send(
-        `The following is the stock information you requested.\n\n${body}`
-      );
+      return res
+        .status(200)
+        .send(`The following is the stock information you requested.\n\n${body}`);
     } catch (e) {
       return res.status(400).send("Bad request");
     }
